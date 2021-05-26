@@ -16,31 +16,34 @@ int main (int argc, char **argv) {
     printf ("Opening %s as input\n", in_file_name);
     FILE *in_file = fopen (in_file_name, "rb");
     printf ("Opening %s as output\n", out_dev_name);
-    int out_file = open (out_dev_name, O_RDWR);
-    if (in_file == NULL || out_file == -1) {
+    int tape_fd = open (out_dev_name, O_RDWR);
+    if (in_file == NULL || tape_fd == -1) {
         printf ("*E* %s\n", strerror(errno));
         exit(-1);
     } else {
         // build the special EOF marker. Ref http://bitsavers.org/bits/Apollo/Apollo_JRJ/readme-jrj.txt
-        uint8_t marker[512];
-        uint8_t *mp = marker;
-        for (int i=0; i < sizeof(marker)/4; i++) {
+        uint8_t cptape_EOF_magic[512];
+        uint8_t *mp = cptape_EOF_magic;
+        for (int i=0; i < sizeof(cptape_EOF_magic)/4; i++) {
             *mp++ = 0xDE;
             *mp++ = 0xAF;
             *mp++ = 0xFA;
             *mp++ = 0xED;
         }
         uint8_t block[512];
-        uint32_t block_count = 0u;
+        int blocks_to_buffer = 8;
+        uint8_t block_buffer[blocks_to_buffer*sizeof(block)];
+        int block_buffer_count=0;
+        int block_count = 0;
         printf ("OK, rewind the tape\n");
         {
             struct mtop mt_op;
             mt_op.mt_op = MTREW;
             mt_op.mt_count = 0;
-            ioctl (out_file, MTIOCTOP, &mt_op);   
+            ioctl (tape_fd, MTIOCTOP, &mt_op);   
         }
         struct mtget mt_status;
-        ioctl(out_file, MTIOCGET, &mt_status);
+        ioctl(tape_fd, MTIOCGET, &mt_status);
         printf ("Drive status:\n");
         printf ("\tmt_type 0x%lX\n", mt_status.mt_type);
         printf ("\tmt_resid 0x%lX\n", mt_status.mt_resid);
@@ -58,7 +61,6 @@ int main (int argc, char **argv) {
         printf ("\t\tGMT_D_800 %ld\n", GMT_D_800 (mt_status.mt_gstat));
         printf ("\t\tGMT_DR_OPEN %ld\n", GMT_DR_OPEN (mt_status.mt_gstat));
         printf ("\t\tGMT_IM_REP_EN %ld\n", GMT_IM_REP_EN (mt_status.mt_gstat));
-        //printf ("\t\tGMT_CLN %ld\n", GMT_CLN (mt_status.mt_gstat));
         printf ("\tmt_erreg 0x%lX\n", mt_status.mt_erreg);
         while (1) {
             if (block_count % 1000 == 0) {
@@ -66,23 +68,45 @@ int main (int argc, char **argv) {
             }
             size_t num_read = fread (block, sizeof(block), 1, in_file);
             if (num_read == 1) {
-                if (memcmp (block, marker, sizeof(marker)) == 0) {
+                // got a block from the cptape dump
+                if (memcmp (block, cptape_EOF_magic, sizeof(cptape_EOF_magic)) == 0) {
+                    // Write an EOF marker to tape
                     printf ("Hit EOF @ block %d\n", block_count);
                     struct mtop mt_op;
                     mt_op.mt_op = MTWEOF;
                     mt_op.mt_count = 1;
-                    ioctl (out_file, MTIOCTOP, &mt_op);   
+                    ioctl (tape_fd, MTIOCTOP, &mt_op);   
                 } else {
-                    // write a regular block
-                    ssize_t written = write (out_file, block, sizeof(block));
-                    if (written != sizeof(block)) {
-                        printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, sizeof(block));
-                        printf ("*E* %s\n",strerror (errno));
-                        break;
+                    //accumulate some blocks before writing to tape to make writing more efficient
+                    // (writing single blocks causes a lot of tape seek)
+                    memcpy (block_buffer, block, sizeof(block_buffer));
+                    block_buffer_count++;
+                    if (block_buffer_count == blocks_to_buffer) {
+                        // write blocks to tape
+                        size_t to_wrte = block_buffer_count * sizeof(block);
+                        ssize_t written = write (tape_fd, block_buffer, to_wrte);
+                        if (written != to_wrte) {
+                            printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, to_wrte);
+                            printf ("*E* %s\n",strerror (errno));
+                            break;
+                        }
+                        block_buffer_count = 0;
                     }
                 }
             } else {
                 printf ("All done");
+                // write any residual blocks
+                if (block_buffer_count > 0) {
+                    printf ("Write residual %d blocks to tape\n", block_buffer_count);
+                    size_t to_wrte = block_buffer_count * sizeof(block);
+                    ssize_t written = write (tape_fd, block_buffer, to_wrte);
+                    if (written != to_wrte) {
+                        printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, to_wrte);
+                        printf ("*E* %s\n",strerror (errno));
+                        break;
+                    }
+                }
+                close (tape_fd);
                 break;
             }
             block_count++;
