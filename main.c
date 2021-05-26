@@ -16,7 +16,7 @@ int main (int argc, char **argv) {
     printf ("Opening %s as input\n", in_file_name);
     FILE *in_file = fopen (in_file_name, "rb");
     printf ("Opening %s as output\n", out_dev_name);
-    int out_file = open (out_dev_name, 0, O_RDWR);
+    int out_file = open (out_dev_name, O_RDWR);
     if (in_file == NULL || out_file == -1) {
         printf ("*E* %s\n", strerror(errno));
         exit(-1);
@@ -33,7 +33,12 @@ int main (int argc, char **argv) {
         uint8_t block[512];
         uint32_t block_count = 0u;
         printf ("OK, rewind the tape\n");
-        ioctl (out_file, MTREW);
+        {
+            struct mtop mt_op;
+            mt_op.mt_op = MTREW;
+            mt_op.mt_count = 0;
+            ioctl (out_file, MTIOCTOP, &mt_op);   
+        }
         struct mtget mt_status;
         ioctl(out_file, MTIOCGET, &mt_status);
         printf ("Drive status:\n");
@@ -72,7 +77,7 @@ int main (int argc, char **argv) {
                     ssize_t written = write (out_file, block, sizeof(block));
                     if (written != sizeof(block)) {
                         printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, sizeof(block));
-                        printf ("%s\n",strerror (errno));
+                        printf ("*E* %s\n",strerror (errno));
                         break;
                     }
                 }
