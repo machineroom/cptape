@@ -31,7 +31,7 @@ int main (int argc, char **argv) {
             *mp++ = 0xED;
         }
         uint8_t block[512];
-        int blocks_to_buffer = 8;
+        int blocks_to_buffer = 16;
         uint8_t block_buffer[blocks_to_buffer*sizeof(block)];
         int block_buffer_count=0;
         int block_count = 0;
@@ -70,6 +70,18 @@ int main (int argc, char **argv) {
             if (num_read == 1) {
                 // got a block from the cptape dump
                 if (memcmp (block, cptape_EOF_magic, sizeof(cptape_EOF_magic)) == 0) {
+                    // write any residual blocks
+                    if (block_buffer_count > 0) {
+                        printf ("Write residual %d blocks to tape\n", block_buffer_count);
+                        size_t to_wrte = block_buffer_count * sizeof(block);
+                        ssize_t written = write (tape_fd, block_buffer, to_wrte);
+                        if (written != to_wrte) {
+                            printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, to_wrte);
+                            printf ("*E* %s\n",strerror (errno));
+                            break;
+                        }
+                    }
+                    block_buffer_count = 0;
                     // Write an EOF marker to tape
                     printf ("Hit EOF @ block %d\n", block_count);
                     struct mtop mt_op;
@@ -79,7 +91,7 @@ int main (int argc, char **argv) {
                 } else {
                     //accumulate some blocks before writing to tape to make writing more efficient
                     // (writing single blocks causes a lot of tape seek)
-                    memcpy (block_buffer, block, sizeof(block_buffer));
+                    memcpy (&block_buffer[block_buffer_count*sizeof(block)], block, sizeof(block));
                     block_buffer_count++;
                     if (block_buffer_count == blocks_to_buffer) {
                         // write blocks to tape
@@ -94,7 +106,6 @@ int main (int argc, char **argv) {
                     }
                 }
             } else {
-                printf ("All done");
                 // write any residual blocks
                 if (block_buffer_count > 0) {
                     printf ("Write residual %d blocks to tape\n", block_buffer_count);
@@ -106,10 +117,11 @@ int main (int argc, char **argv) {
                         break;
                     }
                 }
-                close (tape_fd);
                 break;
             }
             block_count++;
         }
+        printf ("All done\n");
+        close (tape_fd);
     }
 }
