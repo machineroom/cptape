@@ -86,6 +86,46 @@ void dump_tape_info (int tape_fd) {
 #endif
 }
 
+uint8_t block[512];
+#define blocks_to_buffer 16
+uint8_t block_buffer[blocks_to_buffer*sizeof(block)];
+int block_buffer_count=0;
+int block_count = 0;
+
+int write_block(int tape_fd) {
+    //accumulate some blocks before writing to tape to make writing more efficient
+    // (writing single blocks causes a lot of tape seek)
+    memcpy (&block_buffer[block_buffer_count*sizeof(block)], block, sizeof(block));
+    block_buffer_count++;
+    if (block_buffer_count == blocks_to_buffer) {
+        // write blocks to tape
+        size_t to_write = block_buffer_count * sizeof(block);
+        ssize_t written = write (tape_fd, block_buffer, to_write);
+        if (written != to_write) {
+            printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, to_write);
+            printf ("*E* %s\n",strerror (errno));
+            return -1;
+        }
+        block_buffer_count = 0;
+    }
+    return 0;
+}
+
+int flush_block_buffer(int tape_fd) {
+    if (block_buffer_count > 0) {
+        printf ("Write residual %d blocks to tape\n", block_buffer_count);
+        size_t to_write = block_buffer_count * sizeof(block);
+        ssize_t written = write (tape_fd, block_buffer, to_write);
+        if (written != to_write) {
+            printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, to_write);
+            printf ("*E* %s\n",strerror (errno));
+            return -1;
+        }
+    }
+    block_buffer_count = 0;
+    return 0;
+}
+
 int main (int argc, char **argv) {
     char *in_file_name = argv[1];
     char *out_dev_name = argv[2];
@@ -105,84 +145,47 @@ int main (int argc, char **argv) {
         printf ("*E* %s\n", strerror(errno));
         exit(-1);
     }
-    {
-        // build the special EOF marker. Ref http://bitsavers.org/bits/Apollo/Apollo_JRJ/readme-jrj.txt
-        uint8_t cptape_EOF_magic[512];
-        uint8_t *mp = cptape_EOF_magic;
-        for (int i=0; i < sizeof(cptape_EOF_magic)/4; i++) {
-            *mp++ = 0xDE;
-            *mp++ = 0xAF;
-            *mp++ = 0xFA;
-            *mp++ = 0xED;
+    // build the special EOF marker. Ref http://bitsavers.org/bits/Apollo/Apollo_JRJ/readme-jrj.txt
+    uint8_t cptape_EOF_magic[512];
+    uint8_t *mp = cptape_EOF_magic;
+    for (int i=0; i < sizeof(cptape_EOF_magic)/4; i++) {
+        *mp++ = 0xDE;
+        *mp++ = 0xAF;
+        *mp++ = 0xFA;
+        *mp++ = 0xED;
+    }
+    printf ("OK, rewind the tape\n");
+    if (tape_rewind(tape_fd) != 0) {
+        return -1;
+    }
+    while (1) {
+        if (block_count % 1000 == 0) {
+            printf ("Read block %d\n", block_count);
         }
-        uint8_t block[512];
-        int blocks_to_buffer = 16;
-        uint8_t block_buffer[blocks_to_buffer*sizeof(block)];
-        int block_buffer_count=0;
-        int block_count = 0;
-        printf ("OK, rewind the tape\n");
-        if (tape_rewind(tape_fd) != 0) {
-            return -1;
-        }
-        while (1) {
-            if (block_count % 1000 == 0) {
-                printf ("Read block %d\n", block_count);
-            }
-            size_t num_read = fread (block, sizeof(block), 1, in_file);
-            if (num_read == 1) {
-                // got a block from the cptape dump
-                if (memcmp (block, cptape_EOF_magic, sizeof(cptape_EOF_magic)) == 0) {
-                    printf ("Hit EOF @ block %d\n", block_count);
-                    // write any residual blocks
-                    if (block_buffer_count > 0) {
-                        printf ("Write residual %d blocks to tape\n", block_buffer_count);
-                        size_t to_write = block_buffer_count * sizeof(block);
-                        ssize_t written = write (tape_fd, block_buffer, to_write);
-                        if (written != to_write) {
-                            printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, to_write);
-                            printf ("*E* %s\n",strerror (errno));
-                            break;
-                        }
-                    }
-                    block_buffer_count = 0;
-                    // Write an EOF marker to tape
-                    if (write_eof (tape_fd) != 0) {
-                        break;
-                    }
-                } else {
-                    //accumulate some blocks before writing to tape to make writing more efficient
-                    // (writing single blocks causes a lot of tape seek)
-                    memcpy (&block_buffer[block_buffer_count*sizeof(block)], block, sizeof(block));
-                    block_buffer_count++;
-                    if (block_buffer_count == blocks_to_buffer) {
-                        // write blocks to tape
-                        size_t to_write = block_buffer_count * sizeof(block);
-                        ssize_t written = write (tape_fd, block_buffer, to_write);
-                        if (written != to_write) {
-                            printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, to_write);
-                            printf ("*E* %s\n",strerror (errno));
-                            break;
-                        }
-                        block_buffer_count = 0;
-                    }
+        size_t num_read = fread (block, sizeof(block), 1, in_file);
+        if (num_read == 1) {
+            // got a block from the cptape dump
+            if (memcmp (block, cptape_EOF_magic, sizeof(cptape_EOF_magic)) == 0) {
+                printf ("Hit EOF @ block %d\n", block_count);
+                if (flush_block_buffer(tape_fd) != 0) {
+                    break;
+                }
+                // Write an EOF marker to tape
+                if (write_eof (tape_fd) != 0) {
+                    break;
                 }
             } else {
-                // write any residual blocks
-                if (block_buffer_count > 0) {
-                    printf ("Write residual %d blocks to tape\n", block_buffer_count);
-                    size_t to_write = block_buffer_count * sizeof(block);
-                    ssize_t written = write (tape_fd, block_buffer, to_write);
-                    if (written != to_write) {
-                        printf ("*E* failed to write all bytes to tape (%ld != %ld)\n!", written, to_write);
-                        printf ("*E* %s\n",strerror (errno));
-                        break;
-                    }
+                if (write_block(tape_fd) != 0) {
+                    break;
                 }
-                break;
             }
-            block_count++;
+        } else {
+            // write any residual blocks
+            flush_block_buffer(tape_fd);
+            break;
         }
-        printf ("All done\n");
-        close (tape_fd);
+        block_count++;
     }
+    printf ("All done\n");
+    close (tape_fd);
 }
